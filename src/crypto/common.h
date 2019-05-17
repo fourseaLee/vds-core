@@ -6,7 +6,7 @@
 #define VDS_CRYPTO_COMMON_H
 
 #if defined(HAVE_CONFIG_H)
-#include "vds-config.h"
+#include "config/vds-config.h"
 #endif
 
 #include <stdint.h>
@@ -16,7 +16,7 @@
 #include "compat/endian.h"
 
 #if defined(NDEBUG)
-# error "Bitcoin cannot be compiled without assertions."
+//# error "Bitcoin cannot be compiled without assertions."
 #endif
 
 uint16_t static inline ReadLE16(const unsigned char* ptr)
