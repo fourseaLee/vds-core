@@ -1,0 +1,360 @@
+cmake_minimum_required(VERSION 3.5)
+project(BitcoinABC)
+
+set(CMAKE_CXX_STANDARD 14)
+
+# Default visibility is hidden on all targets.
+set(CMAKE_C_VISIBILITY_PRESET hidden)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+
+option(BUILD_BITCOIN_WALLET "Activate the wallet functionality" ON)
+option(BUILD_BITCOIN_ZMQ "Activate the ZeroMQ functionalities" OFF)
+option(BUILD_BITCOIN_SEEDER "Build bitcoin-seeder" OFF)
+option(BUILD_BITCOIN_CLI "Build bitcoin-cli" ON)
+option(BUILD_BITCOIN_TX "Build bitcoin-tx" OFF)
+option(BUILD_BITCOIN_QT "Build bitcoin-qt" OFF)
+option(ENABLE_HARDENING "Harden the executables" ON)
+
+# Cmake uses the CMAKE_BUILD_TYPE variable to select the build configuration.
+# By default it supports more configurations that needed for Bitcozin ABC, and
+# all the releases types set NDEBUG which is unwanted as it disables the assert
+# completely.
+# Remove the -DNDEBUG flag from the CFLAGS/CXXFLAGS in all the configurations
+include(AddCompilerFlags)
+#remove_compiler_flags(-DNDEBUG)
+
+# Overrides the flags for the Debug build type
+# This mimics the autotools behavior by setting the CFLAGS to '-g -O2`, which
+# are not well suited for debugging.
+# FIXME: update CFLAGS with better debug oriented optimization flags
+set(CMAKE_C_FLAGS_DEBUG "-g -O2")
+
+# Prefer -g3, defaults to -g if unavailable
+#add_cxx_compiler_flag_with_fallback(CMAKE_CXX_FLAGS_DEBUG -g3 -g)
+
+# Prefer -Og, defaults to -O0 if unavailable
+#add_cxx_compiler_flag_with_fallback(CMAKE_CXX_FLAGS_DEBUG -Og -O0)
+
+# Define the debugging symbols DEBUG and DEBUG_LOCKORDER when the Debug build
+# type is selected.
+string(APPEND CMAKE_CXX_FLAGS_DEBUG " -DDEBUG -DDEBUG_LOCKORDER")
+
+# Ensure that WINDRES_PREPROC is enabled when using windres.
+if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+# Ensure that WINDRES_PREPROC is enabled when using windres.
+    list(APPEND CMAKE_RC_FLAGS "-DWINDRES_PREPROC")
+
+# Build all static so there is no dll file to distribute.
+    add_compiler_flag(-static)
+endif()
+
+# All windows code is PIC, forcing it on just adds useless compile warnings
+if(NOT ${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+    add_compiler_flag(-fPIC)
+endif()
+
+if(ENABLE_HARDENING)
+# Enable stack protection
+#    add_cxx_compiler_flag(-fstack-protector-all -Wstack-protector)
+
+# Enable some buffer overflow checking
+#    add_compiler_flag(-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2)
+
+# Enable ASLR (these flags are primarily targeting MinGw)
+#    add_linker_flag(-Wl,--dynamicbase -Wl,--nxcompat -Wl,--high-entropy-va)
+
+# Make the relocated sections read-only
+#    add_linker_flag(-Wl,-z,relro -Wl,-z,now)
+
+# CMake provides the POSITION_INDEPENDENT_CODE property to set PIC/PIE.
+# Unfortunately setting the -pie linker flag this way require CMake >= 3.14,
+# which is not widely distributed at the time of writing.
+# FIXME: use the POSITION_INDEPENDENT_CODE property instead
+    if(NOT ${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+        #add_compiler_flag(-fPIE)
+        #add_linker_flag(-pie)
+    else()
+# MinGw provides its own libssp for stack smashing protection
+       #link_libraries(ssp)
+    endif()
+endif()
+
+
+add_c_compiler_flag(-Wnested-externs -Wstrict-prototypes)
+add_compiler_flag(
+            -Wall
+            -Wextra
+            -Wformat
+            -Wvla
+            -Wformat-security
+            -Wcast-align
+            -Wunused-parameter
+            -Wmissing-braces
+            # FIXME: Activating this flag cause cmake to fail on leveldb.
+            # -Wthread-safety-analysis
+            -Wshadow
+)
+
+option(EXTRA_WARNINGS "Enable extra warnings" OFF)
+if(EXTRA_WARNINGS)
+    add_cxx_compiler_flag(-Wsuggest-override)
+else()
+    add_compiler_flag(-Wno-unused-parameter)
+endif()
+
+# Create a target for OpenSSL
+include(BrewHelper)
+find_brew_prefix(OPENSSL_ROOT_DIR openssl)
+find_package(OpenSSL REQUIRED)
+
+
+
+# libtool style configure
+add_subdirectory(config)
+
+# libraries
+add_subdirectory(crypto)
+add_subdirectory(leveldb)
+add_subdirectory(secp256k1)
+add_subdirectory(univalue)
+add_subdirectory(cpp-ethereum)
+
+add_library(util
+            chainparamsbase.cpp
+            clientversion.cpp
+            compat/glibc_sanity.cpp
+            compat/glibcxx_sanity.cpp
+            compat/strnlen.cpp
+            fs.cpp
+            random.cpp
+            rpc/protocol.cpp
+            support/pagelocker.cpp
+            support/cleanse.cpp
+            support/lockedpool.cpp
+            sync.cpp
+            threadinterrupt.cpp
+            uint256.cpp
+            util.cpp
+            utilmoneystr.cpp
+            utilstrencodings.cpp
+            utiltime.cpp
+            )
+
+target_compile_definitions(util PUBLIC HAVE_CONFIG_H)
+target_include_directories(util
+            PUBLIC
+                .
+                # To access the config.
+                ${CMAKE_CURRENT_BINARY_DIR}
+            )
+
+set(BOOST_PACKAGES_REQUIRED chrono filesystem program_options thread)
+
+function(prepend var prefix)
+    set(listVar "")
+    foreach(f ${ARGN})
+        list(APPEND listVar "${prefix}${f}")
+    endforeach(f)
+        set(${var} "${listVar}" PARENT_SCOPE)
+endfunction(prepend)
+
+prepend(BOOST_LIBRARIES "Boost::" ${BOOST_PACKAGES_REQUIRED})
+
+find_package(Boost 1.58 REQUIRED ${BOOST_PACKAGES_REQUIRED})
+target_link_libraries(util univalue crypto ${BOOST_LIBRARIES})
+
+# Make sure boost uses std::atomic (it doesn't before 1.63)
+target_compile_definitions(util PUBLIC BOOST_SP_USE_STD_ATOMIC BOOST_AC_USE_STD_ATOMIC)
+
+# More completely unrelated features shared by all executables.
+# Because nothing says this is different from util than "common"
+add_library(vdssqlite
+            sqlite3.c
+            )
+
+
+add_library(common
+            arith_uint256.cpp 
+            base58.cpp
+            bech32.cpp
+            coins.cpp
+            compressor.cpp
+            eccryptoverify.cpp
+            ecwrapper.cpp
+            hash.cpp
+            key_io.cpp
+            chainparams.cpp
+            consensus/merkle.cpp
+            coins.cpp
+            compressor.cpp
+            policy/feerate.cpp
+            core_read.cpp
+            core_write.cpp
+            key.cpp
+            keystore.cpp
+            netaddress.cpp
+            netbase.cpp
+            primitives/block.cpp
+            primitives/transaction.cpp
+            protocol.cpp
+            scheduler.cpp
+            script/interpreter.cpp
+            script/script.cpp
+            script/script_error.cpp
+            script/sign.cpp
+            script/standard.cpp
+            transaction_builder.cpp
+            )
+
+target_link_libraries(common util secp256k1 rustzcash)
+
+add_library(vdsconsensus
+            primitives/transaction.cpp
+            script/vdsconsensus.cpp
+            uint256.cpp
+            utilstrencodings.cpp
+            )
+
+
+target_link_libraries(vdsconsensus common)
+
+add_library(vds
+            vds/IncrementalMerkleTree.cpp
+            vds/NoteEncryption.cpp
+            vds/Address.cpp
+            vds/JoinSplit.cpp
+            vds/Proof.cpp
+            vds/Note.cpp
+            vds/prf.cpp
+            vds/util.cpp
+            vds/zip32.cpp
+            util.cpp
+            )
+
+target_link_libraries(vds common)  
+
+add_library(server
+    sendalert.cpp 
+    addrman.cpp
+    addrdb.cpp
+    alert.cpp
+    asyncrpcoperation.cpp
+    asyncrpcqueue.cpp
+    bloom.cpp
+    blockencodings.cpp
+    chain.cpp
+    checkpoints.cpp
+    clue.cpp
+    cluedb.cpp
+    deprecation.cpp
+    httprpc.cpp
+    httpserver.cpp
+    init.cpp
+    dsnotificationinterface.cpp
+    dbwrapper.cpp
+    masternode.cpp
+    masternode-payments.cpp
+    masternode-sync.cpp
+    masternodeconfig.cpp
+    masternodeman.cpp
+    masternodestatistic.cpp
+    consensus/merkle.cpp
+    merkleblock.cpp
+    metrics.cpp
+    messagesigner.cpp
+    net.cpp
+    netfulfilledman.cpp
+    net_processing.cpp
+    noui.cpp
+    policy/fees.cpp
+    policy/feerate.cpp
+    policy/policy.cpp
+    pow.cpp
+    rest.cpp
+    rpc/blockchain.cpp
+    rpc/masternode.cpp
+    rpc/misc.cpp
+    rpc/net.cpp
+    rpc/ad.cpp
+    rpc/rawtransaction.cpp
+    rpc/server.cpp
+    script/sigcache.cpp
+    sendalert.cpp
+    tandiadb.cpp
+    timedata.cpp
+    torcontrol.cpp
+    txdb.cpp
+    txdestinationtool.cpp
+    addb.cpp
+    txmempool.cpp
+    ui_interface.cpp
+    validation.cpp
+    validationinterface.cpp
+    versionbits.cpp
+    qtum/qtumstate.cpp
+    qtum/qtumstate.cpp
+    qtum/qtumDGP.cpp
+    qtum/storageresults.cpp
+    )
+
+find_package(Event REQUIRED)
+
+target_include_directories(server PRIVATE leveldb/helpers/memenv)
+
+target_link_libraries(server
+            Event
+            bitcoinconsensus
+            leveldb
+            memenv
+            )
+
+if(BUILD_BITCOIN_WALLET)
+    add_subdirectory(wallet)
+    target_link_libraries(server wallet)
+endif()
+
+# ZeroMQ
+if(BUILD_BITCOIN_ZMQ)
+    add_subdirectory(zmq)
+    target_link_libraries(server zmq)
+endif()
+
+# RPC client support
+add_library(rpcclient rpc/client.cpp)
+target_link_libraries(rpcclient univalue util)
+
+if(BUILD_BITCOIN_CLI)
+    add_executable(vds-cli bitcoin-cli.cpp)
+    if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+        target_sources(vds-cli PRIVATE bitcoin-cli-res.rc)
+    endif()
+
+    target_link_libraries(vds-cli common rpcclient Event)
+endif()
+
+
+
+# bitcoin-tx
+if(BUILD_BITCOIN_TX)
+    add_executable(bitcoin-tx bitcoin-tx.cpp)
+    if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+        target_sources(bitcoin-tx PRIVATE bitcoin-tx-res.rc)
+    endif()
+
+    target_link_libraries(bitcoin-tx bitcoinconsensus)
+endif()
+
+
+
+# bitcoind
+add_executable(bitcoind bitcoind.cpp)
+target_link_libraries(bitcoind server)
+if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+    target_sources(bitcoind PRIVATE bitcoind-res.rc)
+endif()
+
+# Bitcoin-qt
+if(BUILD_BITCOIN_QT)
+    add_subdirectory(qt)
+endif()
+
